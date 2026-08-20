@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Security: read-only review and rescue runs now load a bundled path guard that confines `read`, `grep`, `find`, and `ls` to canonical paths inside the repository, including protection against parent traversal and symlink escapes.
+
 ## 0.7.2
 
 - Fix install failure on Claude Code >= 2.1 (PR #26, thanks @Heelc). The
