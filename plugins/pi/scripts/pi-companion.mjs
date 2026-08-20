@@ -34,6 +34,7 @@ import {
   resolveReviewTarget
 } from "./lib/git.mjs";
 import { readReviewCache, writeReviewCache } from "./lib/review-cache.mjs";
+import { createCancellationIdentity, requestWorkerCancellation, startCancellationServer } from "./lib/cooperative-cancel.mjs";
 import { binaryAvailable, runCommand, terminateProcessTree } from "./lib/process.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import {
@@ -41,6 +42,7 @@ import {
   getConfig,
   listJobs,
   resolveJobsDir,
+  resolveStateDir,
   setConfig,
   upsertJob,
   writeJobFile
@@ -1034,9 +1036,9 @@ async function runForegroundCommand(job, runner, options = {}) {
   return execution;
 }
 
-function spawnDetachedTaskWorker(cwd, jobId) {
+function spawnDetachedTaskWorker(cwd, jobId, cancellation) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "pi-companion.mjs");
-  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
+  const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId, "--cancel-endpoint", cancellation.endpoint, "--cancel-token", cancellation.token], {
     cwd,
     env: process.env,
     detached: true,
@@ -1051,17 +1053,24 @@ function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
+  const cancellation = createCancellationIdentity(resolveStateDir(job.workspaceRoot), job.id);
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: null,
+    cancellation,
     logFile,
     request
   };
+  // Persist the authenticated identity before spawning so a fast worker can
+  // always load its request and cancellation credentials.
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
+  const child = spawnDetachedTaskWorker(cwd, job.id, cancellation);
+  queuedRecord.pid = child.pid ?? null;
+  writeJobFile(job.workspaceRoot, job.id, queuedRecord);
+  upsertJob(job.workspaceRoot, { id: job.id, pid: queuedRecord.pid });
 
   return {
     payload: {
@@ -1320,7 +1329,7 @@ async function handleTask(argv) {
 
 async function handleTaskWorker(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "job-id"]
+    valueOptions: ["cwd", "job-id", "cancel-endpoint", "cancel-token"]
   });
 
   if (!options["job-id"]) {
@@ -1338,6 +1347,14 @@ async function handleTaskWorker(argv) {
     throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
   }
 
+  if (!options["cancel-endpoint"] || !options["cancel-token"]) {
+    throw new Error("Missing authenticated cancellation identity for task-worker.");
+  }
+  const cancellationServer = await startCancellationServer(
+    { endpoint: options["cancel-endpoint"], token: options["cancel-token"] },
+    () => terminateProcessTree(process.pid)
+  );
+
   const { logFile, progress } = createTrackedProgress(
     {
       ...storedJob,
@@ -1347,19 +1364,23 @@ async function handleTaskWorker(argv) {
       logFile: storedJob.logFile ?? null
     }
   );
-  await runTrackedJob(
-    {
-      ...storedJob,
-      workspaceRoot,
-      logFile
-    },
-    () =>
-      executeTaskRun({
-        ...request,
-        onProgress: progress
-      }),
-    { logFile }
-  );
+  try {
+    await runTrackedJob(
+      {
+        ...storedJob,
+        workspaceRoot,
+        logFile
+      },
+      () =>
+        executeTaskRun({
+          ...request,
+          onProgress: progress
+        }),
+      { logFile }
+    );
+  } finally {
+    await cancellationServer.close();
+  }
 }
 
 async function handleStatus(argv) {
@@ -1462,15 +1483,13 @@ async function handleCancel(argv) {
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
   const existing = readStoredJob(workspaceRoot, job.id) ?? {};
 
-  const terminate = terminateProcessTree(job.pid ?? Number.NaN);
-  if (terminate.attempted) {
-    appendLogLine(
-      job.logFile,
-      terminate.delivered
-        ? `Sent SIGTERM to worker pid ${job.pid}.`
-        : `Worker pid ${job.pid} was no longer running.`
-    );
+  const terminate = job.cancellation
+    ? await requestWorkerCancellation(job.cancellation)
+    : { delivered: false, authenticated: false };
+  if (!terminate.authenticated) {
+    throw new Error(`Refusing to signal unverified worker for job ${job.id}. The cancellation endpoint is unavailable or failed authentication.`);
   }
+  appendLogLine(job.logFile, `Authenticated cancellation request delivered to worker pid ${job.pid}.`);
   appendLogLine(job.logFile, "Cancelled by user.");
 
   const completedAt = nowIso();

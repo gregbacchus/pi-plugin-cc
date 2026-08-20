@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import process from "node:process";
 
-import { terminateProcessTree } from "./lib/process.mjs";
+import { requestWorkerCancellation } from "./lib/cooperative-cancel.mjs";
 import { loadState, resolveStateFile, updateState } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -32,7 +32,7 @@ function appendEnvVar(name, value) {
   fs.appendFileSync(process.env.CLAUDE_ENV_FILE, `export ${name}=${shellEscape(value)}\n`, "utf8");
 }
 
-function cleanupSessionJobs(cwd, sessionId) {
+async function cleanupSessionJobs(cwd, sessionId) {
   if (!cwd || !sessionId) {
     return;
   }
@@ -49,20 +49,19 @@ function cleanupSessionJobs(cwd, sessionId) {
     return;
   }
 
+  const safelyRemovedIds = new Set(removedJobs.filter((job) => job.status !== "queued" && job.status !== "running").map((job) => job.id));
   for (const job of removedJobs) {
-    const stillRunning = job.status === "queued" || job.status === "running";
-    if (!stillRunning) {
-      continue;
-    }
+    if (job.status !== "queued" && job.status !== "running") continue;
     try {
-      terminateProcessTree(job.pid ?? Number.NaN);
+      const result = job.cancellation ? await requestWorkerCancellation(job.cancellation) : null;
+      if (result?.authenticated) safelyRemovedIds.add(job.id);
     } catch {
-      // Ignore teardown failures during session shutdown.
+      // Keep an unverifiable active job record; never signal its persisted PID.
     }
   }
 
   updateState(workspaceRoot, (latestState) => {
-    latestState.jobs = latestState.jobs.filter((job) => job.sessionId !== sessionId);
+    latestState.jobs = latestState.jobs.filter((job) => !safelyRemovedIds.has(job.id));
   });
 }
 
@@ -71,9 +70,9 @@ function handleSessionStart(input) {
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
 }
 
-function handleSessionEnd(input) {
+async function handleSessionEnd(input) {
   const cwd = input.cwd || process.cwd();
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  await cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
 }
 
 async function main() {
@@ -86,7 +85,7 @@ async function main() {
   }
 
   if (eventName === "SessionEnd") {
-    handleSessionEnd(input);
+    await handleSessionEnd(input);
   }
 }
 
