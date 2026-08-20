@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { readJsonFile } from "./fs.mjs";
 import { PiRpcClient } from "./pi-rpc.mjs";
@@ -12,6 +13,9 @@ const DEFAULT_CONTINUE_PROMPT =
   "Continue from the current session state. Pick the next highest-value step and follow through until the task is resolved.";
 
 const REVIEW_TOOLS = ["read", "grep", "find", "ls"];
+const REPOSITORY_READ_GUARD = fileURLToPath(
+  new URL("../extensions/repository-read-guard.mjs", import.meta.url)
+);
 
 const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -301,7 +305,7 @@ function declineExtensionUi(client, request) {
   // Fire-and-forget methods need no response.
 }
 
-function buildSpawnArgs(options = {}) {
+export function buildSpawnArgs(options = {}) {
   const args = [];
 
   if (options.resumeSession) {
@@ -316,6 +320,11 @@ function buildSpawnArgs(options = {}) {
 
   if (options.disableExtensions) {
     args.push("--no-extensions");
+  }
+  if (options.sandbox === "read-only") {
+    // --no-extensions disables discovery only; explicit extensions still load.
+    // The guard blocks read-only tools from escaping the canonical repository.
+    args.push("--extension", REPOSITORY_READ_GUARD);
   }
   if (options.disablePromptTemplates) {
     args.push("--no-prompt-templates");

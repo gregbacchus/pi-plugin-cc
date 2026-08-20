@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import process from "node:process";
 import { StringDecoder } from "node:string_decoder";
 
+import { RPC_RECORD_MAX_BYTES } from "./output-limits.mjs";
 import { terminateProcessTree } from "./process.mjs";
 
 const CHANNEL_DEFAULTS = {
@@ -125,12 +126,12 @@ export class PiRpcClient {
         if (line.endsWith("\r")) {
           line = line.slice(0, -1);
         }
-        this._handleLine(line);
+        if (!this._handleRpcLine(line)) return;
       }
       const trailing = this.stdoutBuffer;
       this.stdoutBuffer = "";
       if (trailing.trim()) {
-        this._handleLine(trailing);
+        this._handleRpcLine(trailing);
       }
     }
   }
@@ -148,8 +149,29 @@ export class PiRpcClient {
       if (line.endsWith("\r")) {
         line = line.slice(0, -1);
       }
-      this._handleLine(line);
+      if (!this._handleRpcLine(line)) return;
     }
+    if (Buffer.byteLength(this.stdoutBuffer, "utf8") > RPC_RECORD_MAX_BYTES) {
+      this.stdoutBuffer = "";
+      this._failProtocol(new Error(`RPC record exceeded ${RPC_RECORD_MAX_BYTES} bytes.`));
+    }
+  }
+
+  _handleRpcLine(line) {
+    if (Buffer.byteLength(line, "utf8") > RPC_RECORD_MAX_BYTES) {
+      this.stdoutBuffer = "";
+      this._failProtocol(new Error(`RPC record exceeded ${RPC_RECORD_MAX_BYTES} bytes.`));
+      return false;
+    }
+    this._handleLine(line);
+    return true;
+  }
+
+  _failProtocol(error) {
+    if (Number.isFinite(this.proc?.pid)) {
+      try { terminateProcessTree(this.proc.pid); } catch {}
+    }
+    this._handleExit(error);
   }
 
   _handleLine(line) {
@@ -161,7 +183,7 @@ export class PiRpcClient {
     try {
       message = JSON.parse(line);
     } catch (error) {
-      this._handleExit(new Error(`Failed to parse pi RPC JSONL: ${error.message}: ${line.slice(0, 200)}`));
+      this._failProtocol(new Error(`Failed to parse pi RPC JSONL: ${error.message}: ${line.slice(0, 200)}`));
       return;
     }
 

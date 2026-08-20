@@ -11,6 +11,11 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "pi-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+const LOCK_DIR_NAME = "state.lock";
+const LOCK_TIMEOUT_MS = 10_000;
+const STALE_LOCK_MS = 30_000;
+const LOCK_RETRY_MS = 10;
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
 
 export function nowIso() {
   return new Date().toISOString();
@@ -95,7 +100,53 @@ function removeFileIfExists(filePath) {
 // have added a job to disk after our snapshot was taken, and diffing against
 // that fresher read would wrongly treat the concurrent job as pruned and
 // delete its job/log files.
-export function saveState(cwd, state, previousJobs = state.jobs) {
+function acquireStateLock(cwd) {
+  ensureStateDir(cwd);
+  const lockDir = path.join(resolveStateDir(cwd), LOCK_DIR_NAME);
+  const ownerFile = path.join(lockDir, "owner.json");
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      fs.mkdirSync(lockDir);
+      fs.writeFileSync(ownerFile, JSON.stringify({ token, pid: process.pid, createdAt: nowIso() }));
+      return () => {
+        try {
+          const owner = JSON.parse(fs.readFileSync(ownerFile, "utf8"));
+          if (owner.token === token) fs.rmSync(lockDir, { recursive: true, force: true });
+        } catch (error) {
+          if (error?.code !== "ENOENT") throw error;
+        }
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - fs.statSync(lockDir).mtimeMs > STALE_LOCK_MS) {
+          fs.rmSync(lockDir, { recursive: true, force: true });
+          continue;
+        }
+      } catch (statError) {
+        if (statError?.code === "ENOENT") continue;
+        throw statError;
+      }
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for state lock: ${lockDir}`);
+      Atomics.wait(sleepBuffer, 0, 0, LOCK_RETRY_MS);
+    }
+  }
+}
+
+function writeStateAtomic(cwd, nextState) {
+  const stateFile = resolveStateFile(cwd);
+  const tempFile = `${stateFile}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(tempFile, `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+    fs.renameSync(tempFile, stateFile);
+  } finally {
+    if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+  }
+}
+
+function saveStateUnlocked(cwd, state, previousJobs = state.jobs) {
   ensureStateDir(cwd);
   const nextJobs = pruneJobs(state.jobs ?? []);
   const nextState = {
@@ -116,15 +167,29 @@ export function saveState(cwd, state, previousJobs = state.jobs) {
     removeFileIfExists(job.logFile);
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  writeStateAtomic(cwd, nextState);
   return nextState;
 }
 
+export function saveState(cwd, state, previousJobs = state.jobs) {
+  const release = acquireStateLock(cwd);
+  try {
+    return saveStateUnlocked(cwd, state, previousJobs);
+  } finally {
+    release();
+  }
+}
+
 export function updateState(cwd, mutate) {
-  const state = loadState(cwd);
-  const previousJobs = [...state.jobs];
-  mutate(state);
-  return saveState(cwd, state, previousJobs);
+  const release = acquireStateLock(cwd);
+  try {
+    const state = loadState(cwd);
+    const previousJobs = [...state.jobs];
+    mutate(state);
+    return saveStateUnlocked(cwd, state, previousJobs);
+  } finally {
+    release();
+  }
 }
 
 export function generateJobId(prefix = "job") {

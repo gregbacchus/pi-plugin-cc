@@ -34,6 +34,12 @@ Integrates with [`pi-subagents`](https://github.com/nicobailon/pi-subagents) (`p
 
 Codex's broker layer is gone — Pi is one-conversation-per-process, so the plugin spawns a fresh `pi --mode rpc` for each task. Background jobs are tracked in workspace-scoped state files. Review prompts inline the JSON schema since Pi has no `outputSchema` knob.
 
+### Security boundary
+
+Review and non-writing rescue runs load a bundled repository-confinement guard. Pi's `read`, `grep`, `find`, and `ls` tools may access only paths whose canonical targets remain inside the repository; absolute paths, parent traversal, and symlinks cannot escape it. This is an application-level path boundary, not an operating-system sandbox. Writing rescue runs intentionally have the invoking user's filesystem permissions.
+
+Repository content included in prompts, and content returned by allowed tools, is sent to the configured model provider. Review only repositories and providers appropriate for the sensitivity of that code.
+
 ## Slash commands
 
 | Command | What it does |

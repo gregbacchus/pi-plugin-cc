@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Security: read-only review and rescue runs now load a bundled path guard that confines `read`, `grep`, `find`, and `ls` to canonical paths inside the repository, including protection against parent traversal and symlink escapes.
+- Reliability: shared job-state mutations now use an inter-process lock and atomic file replacement, preventing parallel workers from losing jobs or exposing partially written JSON.
+- Safety: background cancellation now uses a job-scoped authenticated local IPC endpoint. Workers terminate their own process trees, and cancel/session cleanup refuse to signal unverified persisted PIDs.
+- Reliability: RPC JSONL records and stop-review stdout/stderr now have explicit byte limits; overflow terminates the process tree with a clear resource-limit error instead of allowing unbounded memory growth.
+- Correctness: synchronous commands terminated by a signal are now reported as failures instead of being normalized to exit status zero.
+
 ## 0.7.2
 
 - Fix install failure on Claude Code >= 2.1 (PR #26, thanks @Heelc). The
