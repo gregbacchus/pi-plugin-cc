@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   binaryAvailable,
   formatCommandFailure,
+  runCommandChecked,
   terminateProcessTree,
 } from "../plugins/pi/scripts/lib/process.mjs";
 
@@ -143,6 +144,31 @@ describe("formatCommandFailure", () => {
       stdout: "",
     });
     assert.equal(result, "true: exit=0");
+  });
+});
+
+describe("signalled commands", () => {
+  const signalledResult = {
+    command: "git",
+    args: ["status"],
+    status: null,
+    signal: "SIGTERM",
+    stdout: "",
+    stderr: "",
+    error: null
+  };
+
+  it("runCommandChecked rejects a command terminated by a signal", () => {
+    assert.throws(
+      () => runCommandChecked("git", ["status"], { runCommandImpl: () => signalledResult }),
+      /signal=SIGTERM/
+    );
+  });
+
+  it("binaryAvailable reports a signalled command as unavailable", () => {
+    const result = binaryAvailable("git", ["--version"], { runCommandImpl: () => signalledResult });
+    assert.equal(result.available, false);
+    assert.match(result.detail, /SIGTERM/);
   });
 });
 

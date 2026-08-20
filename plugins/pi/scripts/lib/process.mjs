@@ -16,7 +16,7 @@ export function runCommand(command, args = [], options = {}) {
   return {
     command,
     args,
-    status: result.status ?? 0,
+    status: result.status,
     signal: result.signal ?? null,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
@@ -25,11 +25,12 @@ export function runCommand(command, args = [], options = {}) {
 }
 
 export function runCommandChecked(command, args = [], options = {}) {
-  const result = runCommand(command, args, options);
+  const runImpl = options.runCommandImpl ?? runCommand;
+  const result = runImpl(command, args, options);
   if (result.error) {
     throw result.error;
   }
-  if (result.status !== 0) {
+  if (result.signal || result.status !== 0) {
     throw new Error(formatCommandFailure(result));
   }
   return result;
@@ -44,8 +45,8 @@ export function binaryAvailable(command, versionArgs = ["--version"], options = 
   if (result.error) {
     return { available: false, detail: result.error.message };
   }
-  if (result.status !== 0) {
-    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
+  if (result.signal || result.status !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim() || (result.signal ? `signal ${result.signal}` : `exit ${result.status}`);
     return { available: false, detail };
   }
   return { available: true, detail: result.stdout.trim() || result.stderr.trim() || "ok" };
