@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { BoundedOutput, STOP_GATE_STDERR_MAX_BYTES, STOP_GATE_STDOUT_MAX_BYTES } from "./lib/output-limits.mjs";
 import { getPiAvailability } from "./lib/pi.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { terminateProcessTree } from "./lib/process.mjs";
@@ -125,17 +126,25 @@ function runStopReview(cwd, input = {}) {
       return;
     }
 
-    let stdout = "";
-    let stderr = "";
+    const stdout = new BoundedOutput("Stop-review stdout", STOP_GATE_STDOUT_MAX_BYTES);
+    const stderr = new BoundedOutput("Stop-review stderr", STOP_GATE_STDERR_MAX_BYTES);
     let timedOut = false;
+    let overflowError = null;
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
+    const capture = (buffer, chunk) => {
+      if (overflowError) return;
+      try {
+        buffer.append(chunk);
+      } catch (error) {
+        overflowError = error;
+        if (Number.isFinite(child.pid)) {
+          try { terminateProcessTree(child.pid); } catch {}
+        }
+      }
+    };
+    child.stdout.on("data", (chunk) => capture(stdout, chunk));
+    child.stderr.on("data", (chunk) => capture(stderr, chunk));
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -159,6 +168,10 @@ function runStopReview(cwd, input = {}) {
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (overflowError) {
+        resolve({ ok: false, reason: `The stop-time Pi review task exceeded its output limit: ${overflowError.message}` });
+        return;
+      }
       if (timedOut) {
         resolve({
           ok: false,
@@ -169,7 +182,7 @@ function runStopReview(cwd, input = {}) {
       }
 
       if (code !== 0) {
-        const detail = (stderr || stdout).trim();
+        const detail = (stderr.value || stdout.value).trim();
         resolve({
           ok: false,
           reason: detail
@@ -180,7 +193,7 @@ function runStopReview(cwd, input = {}) {
       }
 
       try {
-        const payload = JSON.parse(stdout);
+        const payload = JSON.parse(stdout.value);
         resolve(parseStopReviewOutput(payload?.rawOutput));
       } catch {
         resolve({
