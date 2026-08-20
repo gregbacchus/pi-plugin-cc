@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Security: read-only review and rescue runs now load a bundled path guard that confines `read`, `grep`, `find`, and `ls` to canonical paths inside the repository, including protection against parent traversal and symlink escapes.
+- Reliability: shared job-state mutations now use an inter-process lock and atomic file replacement, preventing parallel workers from losing jobs or exposing partially written JSON.
 
 ## 0.7.2
 

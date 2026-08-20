@@ -4,7 +4,7 @@ import fs from "node:fs";
 import process from "node:process";
 
 import { terminateProcessTree } from "./lib/process.mjs";
-import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
+import { loadState, resolveStateFile, updateState } from "./lib/state.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 export const SESSION_ID_ENV = "PI_COMPANION_SESSION_ID";
@@ -61,12 +61,9 @@ function cleanupSessionJobs(cwd, sessionId) {
     }
   }
 
-  const previousJobs = state.jobs;
-  saveState(
-    workspaceRoot,
-    { ...state, jobs: previousJobs.filter((job) => job.sessionId !== sessionId) },
-    previousJobs
-  );
+  updateState(workspaceRoot, (latestState) => {
+    latestState.jobs = latestState.jobs.filter((job) => job.sessionId !== sessionId);
+  });
 }
 
 function handleSessionStart(input) {
